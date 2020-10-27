@@ -1,0 +1,537 @@
+---
+title: "Bank Marketing Problem"
+author: "Justyna Komorowska"
+date: "February 23, 2020"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include=TRUE, warning=FALSE, message=FALSE, results="markup")
+require(dplyr)
+require(ggplot2)
+require(lubridate)
+require(caret)
+require(gmodels)
+
+empik <- read.csv("dane\\bank_data_prediction_task.csv")
+glimpse(empik)
+
+
+```
+
+## 1. Predictive model for a binar classification.
+
+### 1.1. Data Input
+
+#### 1.1.1 In
+
+```{r data_wrangling}
+empik <- read.csv("dane\\bank_data_prediction_task.csv")
+summary(empik)
+
+empik_norm <- empik %>% mutate(
+  emp.var.rate = (emp.var.rate - min(emp.var.rate))/(max(emp.var.rate)-min(emp.var.rate)),
+  cons.price.idx = (cons.price.idx- min(cons.price.idx, na.rm = TRUE))/(max(cons.price.idx, na.rm = TRUE)-min(cons.price.idx, na.rm = TRUE)),
+  cons.conf.idx = (cons.conf.idx - min(cons.conf.idx))/(max(cons.conf.idx) - min(cons.conf.idx)),
+  euribor3m = (euribor3m - min(euribor3m))/(max(euribor3m) - min(euribor3m)),
+  nr.employed = (nr.employed - min(nr.employed))/(max(nr.employed) - min(nr.employed)),
+  age = (age - min(age))/(max(age) - min(age))
+)
+```
+
+- "normalization" technically should be done on train dataset and re-apllied to all other data sub-sets (test, control and prod) - applying to all data once - for simplicity  
+
+
+
+#### 1.1.2 data split
+
+```{r data_split}
+
+control <- empik_norm %>% 
+  filter(test_control_flag == "control group")
+
+campaign <- empik_norm %>% 
+  filter(test_control_flag != "control group")
+
+set.seed(1206)
+
+in_campaign_test <- createDataPartition(y=campaign$y, p=0.1, list=FALSE) 
+
+campaign_test <- campaign[in_campaign_test,]
+campaign_train <- campaign[-in_campaign_test,]
+```
+
+- campaign_train - main exploratory and model building sample  
+- campaign_test - "blind" sample" - used ONLY for final model performance evaluation  
+
+```{r check contact in control}
+
+suspicious <-  c("contact", "month", "day_of_week", "duration", "campaign")
+
+summary(control[,suspicious])
+
+```
+ - list of predictors not present in control group, considered to be removed from model.
+
+
+### 1.2 Data Visualisation
+
+aka qualitative analysis
+
+#### 1.2.1 Factors {.tabset}
+
+##### 1.2.1.1 Bar Plots
+
+```{r factor_vis}
+factors <- c("job", "marital", "education", "default", "housing", "loan", "contact", "month", "day_of_week", "poutcome")
+
+for(a in factors){
+  print(a)
+  
+  p<-campaign_train %>% 
+    ggplot(aes_string(x = a, fill = "y"))+
+    geom_bar(position = "fill")+
+    geom_text(aes(label=..count..),stat='count',position=position_fill(vjust=0.5))+
+    theme(axis.text.x = element_text(angle = 45))
+  show(p)
+
+
+}
+
+```
+
+##### 1.2.1.2 Crosstables
+
+```{r factors_vis_cross}
+for(a in factors){
+  print(a)
+
+  CrossTable(campaign_train[,"y"],campaign_train[,a], expected = FALSE, prop.r = FALSE, prop.chisq = FALSE, prop.c = TRUE, prop.t = FALSE)
+}
+```
+
+##### 1.2.1.3 Barplots crossed
+
+
+``` {r cross_factors}
+
+for(a in factors){
+  for(b in factors){
+  
+    if(a !=b){ #plotting only if a is not b
+      print(paste0(a," against ",b))
+    
+      p<-campaign_train %>% 
+        ggplot(aes_string(x = a, fill = b))+
+        geom_bar(position = "fill")+
+        geom_text(aes(label=..count..),stat='count',position=position_fill(vjust=0.5))+
+        theme(axis.text.x = element_text(angle = 45))+
+        ggtitle(paste0(a," against ",b))
+      show(p)
+    }
+  }
+
+}
+
+```
+
+#### 1.2.2 Continues Variables
+
+Numeric variables
+
+```{r cont_vis}
+cont <- c("euribor3m", "nr.employed","cons.price.idx","cons.conf.idx","previous","pdays","campaign","duration", "age")
+
+for(a in cont){
+  
+    print(a)
+  
+  p<-campaign_train %>% 
+    ggplot(aes_string(x = a, fill = "y"))+
+    geom_histogram(position = "identity", alpha = 0.5)
+    
+  show(p)
+
+  
+}
+```
+
+#### 1.2.3 Conclusions
+
+**Factor variables**  
+
+
+- "job" - stays in  
+- "marital status" - stays in 
+- education - stays in but dropping "illiterate" level because of low count. (less then 0.04%)  
+- default - stays in but dropping "yes" level (less then 0.03%)  
+- "housing" -  not to be used for modeling because of low varation.  
+- "loan" - as above  
+- "poutcome" - stays in 
+
+
+- Contact info - dropping all - because they are unknown at prediction time in our use case:  
+ - "contact"  
+ - "month"  
+ - "day_of_week"  
+  
+**Continuous variables** 
+
+ 
+- "euribor3m" - stays in. High variablility on levels close to 0 and close to 1  
+- "nr.employed" - stays in
+- "cons.price.idx" - stays in. Very different proportions depending on x value  
+- "cons.conf.idx"  - stays in.
+- "previous" - 2 and more guatanties "yes" - let's change its levels to `0`, `1`, `2+`  
+- "pdays"" - not to be used for modeling. More than 90% is currently NA. if number of days from previous contact is more numerous, it might be quite a valuable variable.
+- "age" - stays in
+
+
+- Contact info - dropping all - because they are unknown at prediction time in our use case:  
+ "campaign"
+ "duratrion"
+  
+```{r clean-up}
+#cleaning both data samples train and test in accordance to plan above
+#control group to be cleaned later
+
+campaign_train_c <-  campaign_train %>% select(-housing,
+                                               - loan,
+                                               - contact,
+                                               - month,
+                                               - day_of_week,
+                                               - pdays,
+                                               - campaign,
+                                               - duration)
+
+campaign_train_c1 <- campaign_train_c %>% 
+  filter(education != "illiterate") %>% 
+  filter(default != "yes") %>% 
+  mutate(education = as.factor(as.character(education)),
+         default = as.factor(as.character(default)))
+
+campaign_train_c2 <- campaign_train_c1 %>% 
+  mutate(previous = if_else(previous == 0, "0", 
+                 if_else(previous == 1, "1","2+")),
+         previous = as.factor(previous))
+
+
+
+#summary(campaign_train_c1)
+
+campaign_test_c <- campaign_test %>% select(-housing,
+                                               - loan,
+                                               - contact,
+                                               - month,
+                                               - day_of_week,
+                                               - pdays,
+                                               - campaign,
+                                               - duration)
+
+campaign_test_c1 <- campaign_test_c %>% 
+  filter(education != "illiterate") %>% 
+  filter(default != "yes") %>% 
+  mutate(education = as.factor(as.character(education)),
+         default = as.factor(as.character(default)))
+
+
+campaign_test_c2 <- campaign_test_c1 %>% 
+  mutate(previous = if_else(previous == 0, "0", 
+                 if_else(previous == 1, "1","2+")),
+         previous = as.factor(previous))
+
+```
+
+### 1.3 Model building   
+
+Goal: a classification problem model - yes/no.
+Also - based on qualitive analysis - high class inbalance. Therefore accuracy metric should NOT be used. Area under curve and ROC will be used for model selection.
+
+Approach:
+1. training 5 fold cross-validation on training sample
+2. model choice using testing sample
+
+### 1.3.1 Model #1 - Decision Tree
+
+
+```{r Modeling Decision tree}
+#1 
+
+#rpart.plot
+
+fitControl <- trainControl(method="repeatedcv",   # cross validation
+                     number=5,		    # do 5 repititions of cv
+                     repeats = 5,
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE)
+
+if(file.exists("model_tree.rds")){
+  model_tree <- readRDS("model_tree.rds")
+}else{
+
+model_tree = train(y ~ ., 
+                  data=campaign_train_c2, 
+                  method="rpart", 
+                  trControl = fitControl)
+
+saveRDS(model_tree,"model_tree.rds")
+
+}
+
+model_tree
+
+```
+
+### 1.3.2 Model #2 - SVM
+
+(radial)
+
+```{r modeling SVM Radial}
+
+fitControl <- trainControl(method="repeatedcv",   # cross validation
+                     number=5,		    # do 5 repititions of cv
+                     repeats = 5,
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE) #zwraca prawdop przynalezn do klasy. useful do upliftu
+
+if(file.exists("model_svmr.rds")){
+  model_svmr <- readRDS("model_svmr.rds")
+}else{
+
+model_svmr = train(y ~ ., 
+                  data=campaign_train_c2, 
+                  method = "svmRadial", 
+                  trControl = fitControl,
+ #                preProc = c("center","scale"), #wyskalowanie
+                  metric = "ROC")
+
+
+model_svmr
+saveRDS(model_svmr,"model_svmr.rds")
+}
+
+model_svmr
+```
+
+### 1.3.2 Model #3 - Random Forest
+
+```{r mrandom forest}
+
+
+fitControl <- trainControl(method="cv",   # cross validation
+                     number=5,		    
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE) #zwraca prawdop przynalezn do klasy. useful do upliftu
+
+if(file.exists("model_rf.rds")){
+  model_rf <- readRDS("model_rf.rds")
+}else{
+
+
+
+model_rf = train(y ~ ., 
+                  data=campaign_train_c2, 
+                  method = "rf", 
+                  trControl = fitControl,
+ #                preProc = c("center","scale"), #wyskalowanie
+                  metric = "ROC")
+
+
+model_rf
+saveRDS(model_rf,"model_rf.rds")
+
+}
+model_rf
+```
+
+### 1.3.4 Model #4 - GBM
+
+```{r gbm}
+
+fitControl <- trainControl(method="repeatedcv",   # cross validation
+                     number=5,		    # do 5 repititions of cv
+                     repeats = 5,
+                     summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+                     classProbs=TRUE) #zwraca prawdop przynalezn do klasy. useful do upliftu
+
+if(file.exists("model_gbm.rds")){
+  model_gbm <- readRDS("model_gbm.rds")
+}else{
+
+model_gbm = train(y ~ ., 
+                  data=campaign_train_c2, 
+                  method = "gbm", 
+                  trControl = fitControl,
+ #                preProc = c("center","scale"), #wyskalowanie
+                  metric = "ROC")
+
+
+model_gbm
+saveRDS(model_gbm,"model_gbm.rds")
+}
+
+model_gbm
+```
+
+
+### 1.3.5. Choosing the best Model
+
+
+```{r modelsrocs, fig.width=12, fig.height=12}
+
+require(plotROC)
+require(ROCR)
+preds <- data.frame(actual = campaign_test_c2$y,
+                    dt = predict(model_tree, campaign_test_c2, type = "prob")[,1],
+                    svm = predict(model_svmr, campaign_test_c2, type = "prob")[,1],
+                    rf = predict(model_rf, campaign_test_c2, type = "prob")[,1],
+                    gbm = predict(model_gbm, campaign_test_c2, type = "prob")[,1])
+
+
+predictions = as.vector(predict(model_rf, campaign_test_c2, type="prob")[,2])
+
+pred = prediction(predictions, campaign_test_c2$y)
+
+pAUC = performance(pred, "auc")
+
+AUC_rf = pAUC@y.values[[1]]
+
+
+predictions_gbm = as.vector(predict(model_gbm, campaign_test_c2, type="prob")[,2])
+
+pred_gbm = prediction(predictions_gbm, campaign_test_c2$y)
+
+pAUC_gbm = performance(pred_gbm, "auc")
+
+AUC_gbm = pAUC_gbm@y.values[[1]]
+
+
+p <- preds %>%
+  ggplot()+
+  geom_roc(aes(m = 1 - dt, d = actual), color = "#619CFF")+ #blue
+  geom_text(aes(x = 0.7, y=0.2, label = "Decision tree"), color = "#619CFF", hjust = "left")+
+  geom_roc(aes(m = 1 - svm, d = actual), color = "#F8766D")+ #red
+  geom_text(aes(x = 0.7, y=0.1, label = "SVM radial"), color = "#F8766D", hjust = "left")+
+  geom_roc(aes(m = 1 - rf, d = actual), color = "#C77CFF")+ #purple
+  geom_text(aes(x = 0.7, y=0.4, label = paste0("Random Forest - AUC=",AUC_rf)), color = "#C77CFF", hjust = "left")+
+  geom_roc(aes(m = 1 - gbm, d = actual), color = "#7CAE00")+ #green
+  geom_text(aes(x = 0.7, y=0.3, label = paste0("Gradient Boosting Machine - AUC=",AUC_gbm)), color = "#7CAE00", hjust = "left")+
+  geom_point(aes(x = 0.165, y=0.71), color="red", size = 5)+
+  geom_text(aes(x = 0.166, y=0.73, label = "A"), color = "red", hjust = "right", size = 8)+
+  geom_abline(slope=1, intercept =0)+
+  geom_abline(slope=1, intercept =0.545, linetype = 2)+
+  geom_text(aes(x = 0.377, y=0.9, label = "45 deg line", angle=45), color = "darkgrey", hjust = "left")+
+  labs(title="Model Comparison")+
+  style_roc()
+  
+
+p
+
+
+```
+
+### 1.4 Model Summary
+
+Random forrest shows highest Area Under Curve. Choosing Random Forest for uplift calculation.
+
+## 2. Uplift
+
+Uplift = increase in probability of "buying" due to the campaign action.  
+
+Approach: 
+1. using model train on campaign set - model predicted probabilities assume the subject (row) was exposed to campaign.
+2. using control set data predict probabilities with random forest model to simulate applying campaign to control set.
+
+### 2.1. Data Preparation
+
+Rows were removed in campaign set - to match training sample structure. In real life application the prediction would be "0" (or "no") for these rows - to avoid over optimistic uplift estimation - here omitted for simplicity.  
+
+```{r control preparation}
+control_c <- control %>% select(-housing,
+                                - loan,
+                                - contact,
+                                - month,
+                                - day_of_week,
+                                - pdays,
+                                - campaign,
+                                - duration)
+
+control_c1 <- control_c %>% 
+  filter(education != "illiterate") %>% 
+  filter(default != "yes") %>% 
+  mutate(education = as.factor(as.character(education)),
+         default = as.factor(as.character(default))) %>% 
+  filter(!is.na(cons.price.idx))
+
+control_c2 <- control_c1 %>% 
+  mutate(previous = if_else(previous == 0, "0", 
+                 if_else(previous == 1, "1","2+")),
+         previous = as.factor(previous))
+```
+
+### 2.2 Base average probability of buying
+
+Calculate as simple ratio of "yes" in control group.
+
+```{r base}
+base = prop.table(table(control$y))  
+
+#base[2]
+
+base_c2 = prop.table(table(control_c2$y)) 
+
+#base_c2[2]
+```
+
+Calculated average base probability of 'term deposit' is `r base_c2[2]`
+
+### 2.3 Uplift calc
+
+We are taking 16476 rows to match the number of calls made in the refference campaign. This represents applying the same campaign cost to a new campaign. In other words we are choosing 16476 most promising future customers/buyers.
+
+```{r preds control}
+preds_control  <- data.frame(actual = control_c2$y,
+                    rf =1- predict(model_rf, control_c2, type = "prob")[,1]) %>% 
+  mutate(base_p = base_c2[2], 
+         uplift_p = rf - base_p)
+
+preds_control_arr <- preds_control %>% 
+  arrange(desc(rf)) %>% 
+  head(n = 16476)
+
+
+preds_control_arr %>%
+  ggplot()+
+  geom_histogram(aes(x=uplift_p), fill="#619CFF")+
+  ggtitle("Uplift distribution")
+
+up_out <- mean(preds_control_arr$uplift_p)
+```
+
+Obtained uplift = `r up_out`. Calculated as mean of per row differences between base and predicted probability of "term deposit" for top 16476 predicted probabilities.
+
+### 2.4 Summary
+
+1. Proposed approach shows ~`r floor(100*up_out)` percentage point uplift  
+2. Performed actions:  
+  2.1. Data wrangling and clean-up  
+  2.2. Data interpretation and variable choice (removed contact group variables)  
+  2.3. Model building with cross-validation  
+  2.4. Best model choice based on AUC
+  2.5. Uplift calculation  
+3. proposed next steps to improve  
+  
+## 3. Next Steps
+
+These are PROPOSED next steps to improve this analysis
+
+1. variable impact assesment aka "opening the black box" - which X's are "significant" and how
+2. variables cross-correlations (Started in 1.2.1.3)  
+3. for some contact variables - we could check prediction sensitivity to those variables - by including in the prediction model and running simlation - in order to check if there is a valid business case in paying for controlling them...
+4. alternative approach: build model using both: campaign and control set with campaign/control flag (categorical variable). Coefficient of that categorical variable would be a proxy for uplift.
